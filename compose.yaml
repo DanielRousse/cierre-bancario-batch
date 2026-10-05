@@ -2,6 +2,7 @@ services:
   mysql:
     image: mysql:8.4
     container_name: banco-mysql
+    restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root123
       MYSQL_DATABASE: banco_db
