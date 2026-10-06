@@ -33,3 +33,26 @@ docker compose up -d --wait
 5. **(MP-4, paso 6) Si mañana llega el archivo del 25 y corres otra vez el cierre del 25, ¿será otra instancia u otra ejecución de la misma? ¿Por qué lo crees?**
    - Será **otra ejecución (`JobExecution`) de la misma instancia (`JobInstance`)**.
    - **¿Por qué?** Porque el parámetro identificador sigue siendo `fecha=2026-12-25`, por lo que la `JobInstance` ya existe en la tabla `BATCH_JOB_INSTANCE` (`JOB_INSTANCE_ID = 4`). Dado que la ejecución anterior (`JOB_EXECUTION_ID = 4`) terminó en `FAILED`, Spring Batch permite reintentar la misma instancia lógica registrando una nueva fila en `BATCH_JOB_EXECUTION` vinculada a la misma instancia.
+
+## Día 2 · El primer chunk
+
+### Boleto de salida
+
+1. **¿Qué diferencia hay entre un step de tipo Tasklet y uno de tipo chunk?**
+   - Un **Tasklet** ejecuta una tarea simple e indivisible (como verificar si existe un archivo o realizar una consulta/mantenimiento puntual) dentro de una transacción y termina devolviendo `RepeatStatus.FINISHED`.
+   - Un step de tipo **chunk** está diseñado para procesar grandes volúmenes de datos en fragmentos transaccionales repetitivos, leyendo elemento por elemento (`ItemReader`), procesándolos o limpiándolos opcionalmente (`ItemProcessor`) y escribiéndolos en bloques (`ItemWriter`) delimitados por un intervalo de confirmación (`commit-interval`).
+
+2. **¿Qué hace cada una de las tres piezas de un chunk? ¿Cuál es opcional?**
+   - **ItemReader (Lector):** Lee datos de entrada secuencialmente (desde un archivo, base de datos, etc.) uno por uno hasta completar el tamaño del chunk o agotar los datos.
+   - **ItemProcessor (Procesador):** Recibe cada elemento leído para transformarlo, limpiarlo o validarlo antes de enviarlo a persistencia. **Es la pieza opcional**; si no se define, los elementos pasan tal como se leyeron directamente al escritor.
+   - **ItemWriter (Escritor):** Recibe la lista completa acumulada en el chunk procesado y la escribe en bloque (por ejemplo, múltiples `INSERT` por JDBC en una sola llamada por lote).
+
+3. **Con 45 movimientos y chunks de 10, ¿cuántos commits habría? ¿Y con chunks de 50?**
+   - **Con chunks de 10:** Habría **5 commits** ($10 + 10 + 10 + 10 + 5$). Los primeros cuatro chunks confirman 10 registros cada uno y el último confirma los 5 restantes.
+   - **Con chunks de 50:** Habría **1 commit**, ya que los 45 registros entran en un único chunk que se confirma en una sola transacción.
+
+4. **¿Por qué el Escritor recibe el chunk completo y no un movimiento a la vez?**
+   - Por rendimiento y optimización de base de datos. Enviar registros individualmente implica múltiples viajes de red (round-trips) y apertura/confirmación repetitiva de transacciones. Al recibir la lista completa, el escritor ejecuta sentencias por lotes (`batch inserts`), reduciendo la sobrecarga de I/O y asegurando que todo el bloque se confirme de forma atómica en un único `commit`.
+
+5. **Mi predicción de la MP-3, paso 1: ¿qué habría pasado sin el Procesador?**
+   - En la base de datos se habrían almacenado registros heterogéneos y con espacios (como `"deposito"`, `"Retiro"` o `" RETIRO"`). Al consultar con collation binario (`utf8mb4_0900_bin`), habrían aparecido múltiples grupos divididos en lugar de solo dos, y al realizar cálculos o sumas de saldos posteriores, los tipos con espacios no coincidirían con las reglas del banco, corrompiendo los balances contables.
