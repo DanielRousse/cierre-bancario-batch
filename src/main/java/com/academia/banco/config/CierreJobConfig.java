@@ -2,6 +2,7 @@ package com.academia.banco.config;
 
 import com.academia.banco.batch.MovimientoProcessor;
 import com.academia.banco.model.Movimiento;
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import javax.sql.DataSource;
@@ -20,6 +21,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 
 @Configuration
@@ -80,12 +82,26 @@ public class CierreJobConfig {
                 .build();
     }
 
-    // El Job: primero revisa que llegó el archivo, después lo carga.
+    // Reto opcional: Tasklet resumenStep que consulta la tabla movimiento
     @Bean
-    public Job cierreDelDiaJob(JobRepository jobRepository, Step verificarArchivoStep, Step cargarMovimientosStep) {
+    public Step resumenStep(JobRepository jobRepository, JdbcTemplate jdbcTemplate) {
+        return new StepBuilder("resumenStep", jobRepository)
+                .tasklet((contribution, chunkContext) -> {
+                    Long totalMovimientos = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM movimiento", Long.class);
+                    BigDecimal totalMonto = jdbcTemplate.queryForObject("SELECT COALESCE(SUM(monto), 0) FROM movimiento", BigDecimal.class);
+                    System.out.println(">>> Resumen: " + totalMovimientos + " movimientos, $" + totalMonto);
+                    return RepeatStatus.FINISHED;
+                })
+                .build();
+    }
+
+    // El Job: primero revisa archivo, luego carga movimientos, finalmente genera resumen.
+    @Bean
+    public Job cierreDelDiaJob(JobRepository jobRepository, Step verificarArchivoStep, Step cargarMovimientosStep, Step resumenStep) {
         return new JobBuilder("cierreDelDiaJob", jobRepository)
                 .start(verificarArchivoStep)
                 .next(cargarMovimientosStep)
+                .next(resumenStep)
                 .build();
     }
 }
