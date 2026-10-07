@@ -56,3 +56,25 @@ docker compose up -d --wait
 
 5. **Mi predicción de la MP-3, paso 1: ¿qué habría pasado sin el Procesador?**
    - En la base de datos se habrían almacenado registros heterogéneos y con espacios (como `"deposito"`, `"Retiro"` o `" RETIRO"`). Al consultar con collation binario (`utf8mb4_0900_bin`), habrían aparecido múltiples grupos divididos en lugar de solo dos, y al realizar cálculos o sumas de saldos posteriores, los tipos con espacios no coincidirían con las reglas del banco, corrompiendo los balances contables.
+
+## Día 3 · Parámetros, fallas y reinicio
+
+### Boleto de salida
+
+1. **¿Qué diferencia hay entre una JobInstance y una JobExecution? Usa como ejemplo el cierre del 25.**
+   - Una **JobInstance** representa la definición lógica única del trabajo parametrizado (por ejemplo, el cierre del día `2026-12-25` en `BATCH_JOB_INSTANCE`). Solo hay una instancia para esa fecha independientemente de cuántas veces se intente.
+   - Una **JobExecution** representa cada intento físico e individual de ejecutar esa instancia (`BATCH_JOB_EXECUTION`). En el caso del cierre del 25, la primera ejecución falló (`FAILED`) porque el archivo no había llegado, y cuando el archivo llegó, el segundo intento fue una nueva ejecución (`COMPLETED`) vinculada exactamente a la misma instancia. Una instancia no se considera completa hasta que una de sus ejecuciones finaliza en `COMPLETED`.
+
+2. **¿En qué caso Spring Batch se niega a correr un cierre, y en qué caso lo reinicia?**
+   - **Se niega (`JobInstanceAlreadyCompleteException`):** Cuando se intenta ejecutar con los mismos parámetros identificadores (misma fecha) de una `JobInstance` que ya tiene una ejecución previa en estado `COMPLETED`. Esto protege al banco contra duplicación de procesos y transacciones ya liquidadas.
+   - **Lo reinicia:** Cuando se ejecuta con los mismos parámetros identificadores de una `JobInstance` cuya última ejecución terminó en estado no completado (como `FAILED`). En ese caso, Spring Batch crea una nueva `JobExecution` para retomar el trabajo.
+
+3. **En el reinicio del día 5, ¿por qué el step de carga leyó 10 movimientos y no 20?**
+   - Porque Spring Batch almacena el estado del progreso en sus tablas de metadatos (`BATCH_STEP_EXECUTION_CONTEXT`). En el primer intento fallido, el primer chunk de 10 movimientos ya se había confirmado exitosamente (`COMMIT_COUNT = 1`) antes de que fallara el segundo chunk en la línea 16. Al reiniciar, Spring Batch sabe que los primeros 10 ya están guardados en MySQL, por lo que el `ItemReader` salta automáticamente esos 10 y comienza a leer desde el movimiento 11, leyendo únicamente los 10 restantes para completar los 20 sin duplicar datos.
+
+4. **¿Qué diferencia hay entre un movimiento filtrado y uno omitido?**
+   - **Filtrado (`FILTER_COUNT`):** Es una decisión intencional de la lógica de negocio aplicada en el `ItemProcessor` al retornar `null` (por ejemplo, descartar un tipo no contemplado como `TRANSFERENCIA` o `PAGO`). No se considera un error ni genera excepciones; el registro se lee pero deliberadamente no se envía al escritor.
+   - **Omitido (`SKIP_COUNT`):** Es una tolerancia técnica ante errores o excepciones que impiden procesar un registro (por ejemplo, un `FlatFileParseException` por un formato corrupto con letras en montos numéricos o delimitadores incorrectos). En lugar de detener el batch, Spring Batch atrapa la excepción permitida y descarta ese renglón, acumulándolo en el contador de skips hasta alcanzar un límite predefinido (`skipLimit`).
+
+5. **¿Por qué importa el código de salida, si el estado ya queda en las tablas?**
+   - Porque los procesos por lotes en producción son ejecutados de manera automatizada y desatendida por planificadores de tareas del sistema operativo o software empresarial (como Control-M, cron o Kubernetes Jobs). Estos orquestadores no consultan las tablas internas de la base de datos de Spring Batch; únicamente evalúan el código de salida numérico del proceso (`exit code`). Un código `0` indica éxito (`COMPLETED`), mientras que un código distinto de cero (como `5` para `FAILED`) activa de inmediato alertas operativas, reintentos o detención de tareas dependientes en la cadena batch del banco.
