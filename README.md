@@ -78,3 +78,27 @@ docker compose up -d --wait
 
 5. **¿Por qué importa el código de salida, si el estado ya queda en las tablas?**
    - Porque los procesos por lotes en producción son ejecutados de manera automatizada y desatendida por planificadores de tareas del sistema operativo o software empresarial (como Control-M, cron o Kubernetes Jobs). Estos orquestadores no consultan las tablas internas de la base de datos de Spring Batch; únicamente evalúan el código de salida numérico del proceso (`exit code`). Un código `0` indica éxito (`COMPLETED`), mientras que un código distinto de cero (como `5` para `FAILED`) activa de inmediato alertas operativas, reintentos o detención de tareas dependientes en la cadena batch del banco.
+
+## Día 4 · De MySQL a MongoDB
+
+### Boleto de salida
+
+1. **¿Qué hace cada uno de los tres steps de tu Job, y de qué tipo es cada uno?**
+   - **`verificarArchivoStep` (tipo Tasklet):** Valida que exista en el sistema de archivos el archivo CSV del día (`datos/movimientos-<fecha>.csv`) y cuenta los movimientos declarados. Si el archivo no existe, lanza una excepción y detiene el Job de inmediato antes de iniciar la carga.
+   - **`cargarMovimientosStep` (tipo Chunk):** Lee los movimientos desde el archivo CSV con `FlatFileItemReader`, los procesa y filtra con `MovimientoProcessor` (`ItemProcessor`), y los inserta en la tabla `movimiento` de MySQL por bloques de 10 en 10 con `JdbcBatchItemWriter`. Cuenta con tolerancia a fallas (`faultTolerant`, `skip(FlatFileParseException.class)`, `skipLimit(3)`).
+   - **`publicarSaldosStep` (tipo Chunk, sin Procesador):** Lee desde MySQL mediante `JdbcCursorItemReader` el saldo calculado (depósitos menos retiros) y el número de movimientos agrupados por cuenta (`GROUP BY cuenta`), y escribe/actualiza los documentos consolidados de 3 en 3 en la colección `saldos` de MongoDB usando `MongoItemWriter`.
+
+2. **¿Por qué el cierre del 9 no duplicó los saldos, y el del 10 (sin `@Id`) sí?**
+   - **Cierre del 9 (con `@Id`):** La anotación `@Id` en `SaldoCuenta` establece que el número de cuenta es el `_id` único del documento en MongoDB. Al escribir con `MongoItemWriter`, MongoDB ejecuta una operación de reemplazo/upsert basada en ese `_id`: si el documento de la cuenta ya existe, lo actualiza con los saldos nuevos en vez de duplicarlo, manteniendo exactamente 15 documentos.
+   - **Cierre del 10 (sin `@Id`):** Al remover `@Id`, MongoDB ya no utiliza la cuenta como identificador del documento y genera automáticamente un nuevo `ObjectId` único y aleatorio para cada registro en cada ejecución. Dado que ese `ObjectId` nunca antes existió, MongoDB inserta un documento adicional por cada cuenta, pasando de 15 a 30 documentos duplicados.
+
+3. **Al reiniciar el cierre del 11, ¿por qué no se cargó otra vez el archivo?**
+   - Porque Spring Batch consulta el historial de ejecuciones en sus tablas de metadatos (`BATCH_STEP_EXECUTION`). Al detectar que en el primer intento fallido los steps `verificarArchivoStep` y `cargarMovimientosStep` terminaron exitosamente con estado `COMPLETED`, el framework determina que dichos pasos ya están completos (`Step already complete or not restartable, so no action to execute`). Por lo tanto, no los vuelve a ejecutar, evitando cargar nuevamente los 15 movimientos a MySQL y retomando el flujo directamente en el paso que falló (`publicarSaldosStep`).
+
+4. **¿Qué diferencia hay entre `spring-boot-starter-data-mongodb` y «Spring Batch MongoDB» (`batch-data-mongodb`)?**
+   - **`spring-boot-starter-data-mongodb`:** Es la dependencia de Spring Data MongoDB utilizada por la aplicación para interactuar con MongoDB como base de datos de negocio (escribir y consultar los documentos de saldos del banco mediante `MongoTemplate` y `MongoItemWriter`), manteniendo la auditoría interna de Spring Batch en MySQL.
+   - **«Spring Batch MongoDB» (`batch-data-mongodb`):** Es una dependencia diseñada para que el repositorio interno de metadatos de Spring Batch (`JobRepository`) almacene las propias tablas del framework (`BATCH_JOB_INSTANCE`, `BATCH_JOB_EXECUTION`, etc.) en colecciones de MongoDB en vez de un motor relacional como MySQL (lo cual requiere que MongoDB opere con réplicas configuradas para soportar transacciones multi-documento).
+
+## Lo que aprendí esta semana
+
+Un proceso batch es una aplicación automatizada y desatendida que procesa grandes volúmenes de datos históricos o acumulados de manera secuencial, sin requerir interacción en tiempo real por parte de un usuario. Un Job es el contenedor principal que orquesta un flujo de trabajo compuesto por uno o varios Steps, los cuales pueden ser de tipo Tasklet (tareas indivisibles y puntuales) o de tipo Chunk (fragmentos transaccionales estructurados en ItemReader, ItemProcessor e ItemWriter con intervalos de confirmación parciales). Cuando ocurre una falla, Spring Batch detiene la ejecución de forma ordenada y registra detalladamente el estado, los contadores de progreso y el mensaje del error en sus tablas de metadatos en la base de datos relacional. Gracias a esta arquitectura transaccional, Spring Batch garantiza idempotencia y recuperación inteligente: al solucionar el problema y relanzar el Job con los mismos parámetros identificadores, el sistema omite los Steps que ya concluyeron en `COMPLETED` y reanuda el procesamiento exactamente desde el último chunk confirmado, asegurando que no se dupliquen registros ni se corrompa la contabilidad del banco.
