@@ -3,6 +3,7 @@ package com.academia.banco.config;
 import com.academia.banco.batch.MovimientoProcessor;
 import com.academia.banco.model.Movimiento;
 import com.academia.banco.model.SaldoCuenta;
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import javax.sql.DataSource;
@@ -118,7 +119,7 @@ public class CierreJobConfig {
                 .build();
     }
 
-    // Un Step de tipo Chunk, sin Procesador: lee de MySQL y escribe en MongoDB, de 3 en 3.
+    // Un Step de tipo Chunk: lee de MySQL, procesa (filtrando cuentas sobregiradas) y escribe en MongoDB, de 3 en 3.
     @Bean
     public Step publicarSaldosStep(JobRepository jobRepository, PlatformTransactionManager transactionManager,
                                    JdbcCursorItemReader<SaldoCuenta> saldoReader,
@@ -127,6 +128,7 @@ public class CierreJobConfig {
                 .<SaldoCuenta, SaldoCuenta>chunk(3)
                 .transactionManager(transactionManager)
                 .reader(saldoReader)
+                .processor(saldo -> (saldo.saldo() != null && saldo.saldo().compareTo(BigDecimal.ZERO) < 0) ? null : saldo)
                 .writer(saldoWriter)
                 .build();
     }

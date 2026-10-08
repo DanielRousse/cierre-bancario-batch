@@ -102,3 +102,14 @@ docker compose up -d --wait
 ## Lo que aprendí esta semana
 
 Un proceso batch es una aplicación automatizada y desatendida que procesa grandes volúmenes de datos históricos o acumulados de manera secuencial, sin requerir interacción en tiempo real por parte de un usuario. Un Job es el contenedor principal que orquesta un flujo de trabajo compuesto por uno o varios Steps, los cuales pueden ser de tipo Tasklet (tareas indivisibles y puntuales) o de tipo Chunk (fragmentos transaccionales estructurados en ItemReader, ItemProcessor e ItemWriter con intervalos de confirmación parciales). Cuando ocurre una falla, Spring Batch detiene la ejecución de forma ordenada y registra detalladamente el estado, los contadores de progreso y el mensaje del error en sus tablas de metadatos en la base de datos relacional. Gracias a esta arquitectura transaccional, Spring Batch garantiza idempotencia y recuperación inteligente: al solucionar el problema y relanzar el Job con los mismos parámetros identificadores, el sistema omite los Steps que ya concluyeron en `COMPLETED` y reanuda el procesamiento exactamente desde el último chunk confirmado, asegurando que no se dupliquen registros ni se corrompa la contabilidad del banco.
+
+## Reto opcional · Cuentas sobregiradas
+
+- **Resultado de la ejecución (`2026-10-22`):**
+  - `publicarSaldosStep`: `READ_COUNT = 15`, `FILTER_COUNT = 6`, `WRITE_COUNT = 9`, `COMMIT_COUNT = 5`.
+  - El `ItemProcessor` identificó las 6 cuentas con saldo negativo y devolvió `null`, filtrándolas para que el escritor solo recibiera las 9 cuentas con saldo positivo o cero.
+- **¿Qué pasa con los documentos viejos en MongoDB y qué harías?**
+  - Dado que filtrar (`return null`) simplemente descarta el registro en el escritor y no emite operaciones de borrado (`DELETE`), los documentos de esas 6 cuentas sobregiradas que ya se habían guardado en cierres de días anteriores siguen existiendo en MongoDB con saldos desactualizados.
+  - **Solución propuesta:**
+    1. **Tasklet de limpieza o reemplazo total:** Agregar un step Tasklet previo a la publicación que limpie la colección (`mongoTemplate.dropCollection("saldos")`), o ejecutar un `deleteMany` de cuentas que ya no tienen saldo activo.
+    2. **Marcado explícito (Flag de negocio):** En lugar de descartar con `null`, actualizar el documento en MongoDB con un campo de control como `sobregirada: true` o `estado: "SOBREGIRADA"`, permitiendo a los sistemas consumidores y a la app bancaria conocer el estado contable actual en vez de consultar datos obsoletos.
